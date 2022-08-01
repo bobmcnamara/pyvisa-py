@@ -41,7 +41,7 @@ VXI11_ERRORS_TO_VISA = {
 
 @Session.register(constants.InterfaceType.tcpip, "INSTR")
 class TCPIPInstrSession(Session):
-    """A class to dispatch to either VXI11 or HiSLIP based on the protocol."""
+    """A class to dispatch to VXI11, HiSLIP, or VICP, based on the protocol."""
 
     def __new__(
         cls,
@@ -51,14 +51,15 @@ class TCPIPInstrSession(Session):
         open_timeout: Optional[float] = None,
     ):
 
-        if cls is not TCPIPInstrSession:
-            return super().__new__(cls)
-
         if parsed is None:
             parsed = rname.parse_resource_name(resource_name)
 
         if parsed.lan_device_name.lower().startswith("hislip"):
             return TCPIPInstrHiSLIP(
+                resource_manager_session, resource_name, parsed, open_timeout
+            )
+        elif parsed.lan_device_name.lower().startswith("vicp"):
+            return TCPIPInstrVicp(
                 resource_manager_session, resource_name, parsed, open_timeout
             )
         else:
@@ -68,7 +69,7 @@ class TCPIPInstrSession(Session):
 
 
 @Session.register(constants.InterfaceType.tcpip, "HISLIP")
-class TCPIPInstrHiSLIP(TCPIPInstrSession):
+class TCPIPInstrHiSLIP(Session):
     """A TCPIP Session built on socket standard library using HiSLIP protocol."""
 
     # Override parsed to take into account the fact that this class is only used
@@ -231,7 +232,7 @@ class Vxi11CoreClient(vxi11.CoreClient):
 
 
 @Session.register(constants.InterfaceType.tcpip, "VXI11")
-class TCPIPInstrVxi11(TCPIPInstrSession):
+class TCPIPInstrVxi11(Session):
     """A TCPIP Session built on socket standard library using VXI-11 protocol."""
 
     #: Maximum size of a chunk of data in bytes.
@@ -626,6 +627,149 @@ class TCPIPInstrVxi11(TCPIPInstrSession):
             self.timeout = value / 1000.0
             self._io_timeout = int(self.timeout * 1000)
         return StatusCode.success
+
+
+@Session.register(constants.InterfaceType.tcpip, "VICP")
+class TCPIPInstrVicp(Session):
+    """A VICP Session that uses the network standard library to do the low
+    level communication.
+    """
+
+    # Override parsed to take into account the fact that this class is only used
+    # for a specific kind of resource
+    parsed: rname.TCPIPInstr
+
+    @staticmethod
+    def list_resources() -> List[str]:
+        # TODO: is there a way to get this?
+        return []
+
+    def after_parsing(self) -> None:
+        # TODO: board_number not handled
+        from .protocols import vicpclient
+
+        if "," in self.parsed.lan_device_name:
+            _, port_str = self.parsed.lan_device_name.split(",")
+            port = int(port_str)
+        else:
+            port = 1861
+        self.interface = vicpclient.Client(self.parsed.host_address, port)
+        self.VicpTimeout = vicpclient.VicpTimeout
+
+    def close(self) -> StatusCode:
+        self.interface.close()
+        self.interface = None
+        return StatusCode.success
+
+    def read(self, count: int) -> Tuple[bytes, StatusCode]:
+        """Reads data from device or interface synchronously.
+
+        Corresponds to viRead function of the VISA library.
+
+         Parameters
+        -----------
+        count : int
+            Number of bytes to be read.
+
+        Returns
+        -------
+        bytes
+            Data read from the device
+        StatusCode
+            Return value of the library call.
+
+        """
+        try:
+            data = self.interface.receive(count)
+        except self.VicpTimeout:
+            return b"", StatusCode.error_timeout
+
+        if len(data) >= count:
+            return data, StatusCode.success_max_count_read
+        else:
+            return data, StatusCode.success_termination_character_read
+
+    def write(self, data: bytes) -> Tuple[int, StatusCode]:
+        """Writes data to device or interface synchronously.
+
+        Corresponds to viWrite function of the VISA library.
+
+        Parameters
+        ----------
+        data : bytes
+            Data to be written.
+
+        Returns
+        -------
+        int
+            Number of bytes actually transferred
+        StatusCode
+            Return value of the library call.
+
+        """
+        self.interface.send(data)
+
+        return len(data), StatusCode.success
+
+    def clear(self) -> StatusCode:
+        """Clears a device.
+
+        Corresponds to viClear function of the VISA library.
+
+        """
+        self.interface.device_clear()
+
+        return StatusCode.success
+
+    def _set_timeout(self, attribute: ResourceAttribute, value: int) -> StatusCode:
+
+        status = super()._set_timeout(attribute, value)
+        if hasattr(self.interface, "timeout"):
+            self.interface.timeout = 1e-3 * value
+
+        return status
+
+    def _get_attribute(self, attribute: ResourceAttribute) -> Tuple[Any, StatusCode]:
+        """Get the value for a given VISA attribute for this session.
+
+        Use to implement custom logic for attributes.
+
+        Parameters
+        ----------
+        attribute : ResourceAttribute
+            Attribute for which the state query is made
+
+        Returns
+        -------
+        Any
+            State of the queried attribute for a specified resource
+        StatusCode
+            Return value of the library call.
+
+        """
+        raise UnknownAttribute(attribute)
+
+    def _set_attribute(
+        self, attribute: ResourceAttribute, attribute_state: Any
+    ) -> StatusCode:
+        """Sets the state of an attribute.
+
+        Corresponds to viSetAttribute function of the VISA library.
+
+        Parameters
+        ----------
+        attribute : constants.ResourceAttribute
+            Attribute for which the state is to be modified. (Attributes.*)
+        attribute_state : Any
+            The state of the attribute to be set for the specified object.
+
+        Returns
+        -------
+        StatusCode
+            Return value of the library call.
+
+        """
+        raise UnknownAttribute(attribute)
 
 
 @Session.register(constants.InterfaceType.tcpip, "SOCKET")
