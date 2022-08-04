@@ -10,7 +10,7 @@ import random
 import select
 import socket
 import time
-from typing import Any, List, Optional, Tuple
+from typing import Any, List, Optional, Tuple, Union
 
 from pyvisa import attributes, constants, errors, rname
 from pyvisa.constants import ResourceAttribute, StatusCode
@@ -48,24 +48,26 @@ class TCPIPInstrSession(Session):
         resource_manager_session: VISARMSession,
         resource_name: str,
         parsed=None,
-        open_timeout: Optional[float] = None,
+        open_timeout: Optional[int] = None,
     ):
+        obj: Union[TCPIPInstrHiSLIP, TCPIPInstrVicp, TCPIPInstrVxi11]
 
         if parsed is None:
             parsed = rname.parse_resource_name(resource_name)
 
         if parsed.lan_device_name.lower().startswith("hislip"):
-            return TCPIPInstrHiSLIP(
+            obj = TCPIPInstrHiSLIP(
                 resource_manager_session, resource_name, parsed, open_timeout
             )
         elif parsed.lan_device_name.lower().startswith("vicp"):
-            return TCPIPInstrVicp(
+            obj = TCPIPInstrVicp(
                 resource_manager_session, resource_name, parsed, open_timeout
             )
         else:
-            return TCPIPInstrVxi11(
+            obj = TCPIPInstrVxi11(
                 resource_manager_session, resource_name, parsed, open_timeout
             )
+        return obj
 
 
 @Session.register(constants.InterfaceType.tcpip, "HISLIP")
@@ -89,7 +91,7 @@ class TCPIPInstrHiSLIP(Session):
             port = int(port_str)
         else:
             port = 4880
-        self.interface = hislip.Instrument(self.parsed.host_address, port=port)
+        self.interface = hislip.Instrument(self.parsed.host_address, port=port, open_timeout=self.open_timeout)
 
     def close(self) -> StatusCode:
         self.interface.close()
@@ -124,15 +126,16 @@ class TCPIPInstrHiSLIP(Session):
         """
         try:
             data = self.interface.receive(count)
-        except socket.timeout:
-            return b"", StatusCode.error_timeout
+            status = (
+                StatusCode.success_termination_character_read if self.interface.rmt
+                else StatusCode.success_max_count_read if len(data) >= count
+                else StatusCode.success
+            )
 
-        if self.interface.rmt:  # test the Response Message Terminator
-            return data, StatusCode.success_termination_character_read
-        elif len(data) >= count:
-            return data, StatusCode.success_max_count_read
-        else:
-            return data, StatusCode.success
+        except socket.timeout:
+            data, status = b"", StatusCode.error_timeout
+
+        return data, status
 
     def write(self, data: bytes) -> Tuple[int, StatusCode]:
         """Writes data to device or interface synchronously.
@@ -219,9 +222,9 @@ class Vxi11CoreClient(vxi11.CoreClient):
 
     """
 
-    def __init__(self, host, port, open_timeout=5000):
+    def __init__(self, host: str, port: Optional[int], open_timeout: Optional[int] = 5000) -> None:
         self.packer = vxi11.Vxi11Packer()
-        self.unpacker = vxi11.Vxi11Unpacker("")
+        self.unpacker = vxi11.Vxi11Unpacker(b"")
         prog, vers = vxi11.DEVICE_CORE_PROG, vxi11.DEVICE_CORE_VERS
 
         if port is None:
@@ -646,15 +649,14 @@ class TCPIPInstrVicp(Session):
 
     def after_parsing(self) -> None:
         # TODO: board_number not handled
-        from .protocols import vicpclient
+        import pyvicp  # try "pip install pyvicp" if this is missing
 
         if "," in self.parsed.lan_device_name:
             _, port_str = self.parsed.lan_device_name.split(",")
             port = int(port_str)
         else:
             port = 1861
-        self.interface = vicpclient.Client(self.parsed.host_address, port)
-        self.VicpTimeout = vicpclient.VicpTimeout
+        self.interface = pyvicp.Client(self.parsed.host_address, port, open_timeout=self.open_timeout)
 
     def close(self) -> StatusCode:
         self.interface.close()
@@ -681,7 +683,7 @@ class TCPIPInstrVicp(Session):
         """
         try:
             data = self.interface.receive(count)
-        except self.VicpTimeout:
+        except socket.timeout:
             return b"", StatusCode.error_timeout
 
         if len(data) >= count:
