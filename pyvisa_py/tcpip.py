@@ -91,7 +91,9 @@ class TCPIPInstrHiSLIP(Session):
             port = int(port_str)
         else:
             port = 4880
-        self.interface = hislip.Instrument(self.parsed.host_address, port=port, open_timeout=self.open_timeout)
+        self.interface = hislip.Instrument(
+            self.parsed.host_address, port=port, open_timeout=self.open_timeout
+        )
 
     def close(self) -> StatusCode:
         self.interface.close()
@@ -127,8 +129,10 @@ class TCPIPInstrHiSLIP(Session):
         try:
             data = self.interface.receive(count)
             status = (
-                StatusCode.success_termination_character_read if self.interface.rmt
-                else StatusCode.success_max_count_read if len(data) >= count
+                StatusCode.success_termination_character_read
+                if self.interface.rmt
+                else StatusCode.success_max_count_read
+                if len(data) >= count
                 else StatusCode.success
             )
 
@@ -222,7 +226,9 @@ class Vxi11CoreClient(vxi11.CoreClient):
 
     """
 
-    def __init__(self, host: str, port: Optional[int], open_timeout: Optional[int] = 5000) -> None:
+    def __init__(
+        self, host: str, port: Optional[int], open_timeout: Optional[int] = 5000
+    ) -> None:
         self.packer = vxi11.Vxi11Packer()
         self.unpacker = vxi11.Vxi11Unpacker(b"")
         prog, vers = vxi11.DEVICE_CORE_PROG, vxi11.DEVICE_CORE_VERS
@@ -656,7 +662,9 @@ class TCPIPInstrVicp(Session):
             port = int(port_str)
         else:
             port = 1861
-        self.interface = pyvicp.Client(self.parsed.host_address, port, open_timeout=self.open_timeout)
+        self.interface = pyvicp.Client(
+            self.parsed.host_address, port, open_timeout=self.open_timeout
+        )
 
     def close(self) -> StatusCode:
         self.interface.close()
