@@ -10,7 +10,7 @@ import random
 import select
 import socket
 import time
-from typing import Any, List, Optional, Tuple, Union
+from typing import Any, List, Optional, Tuple, Type
 
 from pyvisa import attributes, constants, errors, rname
 from pyvisa.constants import ResourceAttribute, StatusCode
@@ -50,24 +50,21 @@ class TCPIPInstrSession(Session):
         parsed=None,
         open_timeout: Optional[int] = None,
     ):
-        obj: Union[TCPIPInstrHiSLIP, TCPIPInstrVicp, TCPIPInstrVxi11]
+        newcls: Type
 
         if parsed is None:
             parsed = rname.parse_resource_name(resource_name)
 
         if parsed.lan_device_name.lower().startswith("hislip"):
-            obj = TCPIPInstrHiSLIP(
-                resource_manager_session, resource_name, parsed, open_timeout
-            )
+            newcls = TCPIPInstrHiSLIP
+
         elif parsed.lan_device_name.lower().startswith("vicp"):
-            obj = TCPIPInstrVicp(
-                resource_manager_session, resource_name, parsed, open_timeout
-            )
+            newcls = TCPIPInstrVicp
+
         else:
-            obj = TCPIPInstrVxi11(
-                resource_manager_session, resource_name, parsed, open_timeout
-            )
-        return obj
+            newcls = TCPIPInstrVxi11
+
+        return newcls(resource_manager_session, resource_name, parsed, open_timeout)
 
 
 @Session.register(constants.InterfaceType.tcpip, "HISLIP")
@@ -269,6 +266,8 @@ class TCPIPInstrVxi11(Session):
         return []
 
     def after_parsing(self) -> None:
+        # TODO: board_number not handled
+
         host_address = self.parsed.host_address
         if "," in host_address:
             host_address, port_str = host_address.split(",")
@@ -655,6 +654,7 @@ class TCPIPInstrVicp(Session):
 
     def after_parsing(self) -> None:
         # TODO: board_number not handled
+
         import pyvicp  # try "pip install pyvicp" if this is missing
 
         if "," in self.parsed.lan_device_name:
