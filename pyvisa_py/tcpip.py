@@ -52,26 +52,28 @@ class TCPIPInstrSession(Session):
     ):
         obj: Union[TCPIPInstrHiSLIP, TCPIPInstrVicp, TCPIPInstrVxi11]
 
+        if cls is not TCPIPInstrSession:
+            return Session.__new__(cls)
+
         if parsed is None:
             parsed = rname.parse_resource_name(resource_name)
 
         if parsed.lan_device_name.lower().startswith("hislip"):
-            obj = TCPIPInstrHiSLIP(
-                resource_manager_session, resource_name, parsed, open_timeout
-            )
+            cls = TCPIPInstrHiSLIP
+
         elif parsed.lan_device_name.lower().startswith("vicp"):
-            obj = TCPIPInstrVicp(
-                resource_manager_session, resource_name, parsed, open_timeout
-            )
+            cls = TCPIPInstrVicp
+
         else:
-            obj = TCPIPInstrVxi11(
-                resource_manager_session, resource_name, parsed, open_timeout
-            )
-        return obj
+            cls = TCPIPInstrVxi11
+
+        return cls.__new__(
+            cls, resource_manager_session, resource_name, parsed, open_timeout
+        )
 
 
 @Session.register(constants.InterfaceType.tcpip, "HISLIP")
-class TCPIPInstrHiSLIP(Session):
+class TCPIPInstrHiSLIP(TCPIPInstrSession):
     """A TCPIP Session built on socket standard library using HiSLIP protocol."""
 
     # Override parsed to take into account the fact that this class is only used
@@ -241,7 +243,7 @@ class Vxi11CoreClient(vxi11.CoreClient):
 
 
 @Session.register(constants.InterfaceType.tcpip, "VXI11")
-class TCPIPInstrVxi11(Session):
+class TCPIPInstrVxi11(TCPIPInstrSession):
     """A TCPIP Session built on socket standard library using VXI-11 protocol."""
 
     #: Maximum size of a chunk of data in bytes.
@@ -269,6 +271,8 @@ class TCPIPInstrVxi11(Session):
         return []
 
     def after_parsing(self) -> None:
+        # TODO: board_number not handled
+
         host_address = self.parsed.host_address
         if "," in host_address:
             host_address, port_str = host_address.split(",")
@@ -639,7 +643,7 @@ class TCPIPInstrVxi11(Session):
 
 
 @Session.register(constants.InterfaceType.tcpip, "VICP")
-class TCPIPInstrVicp(Session):
+class TCPIPInstrVicp(TCPIPInstrSession):
     """A VICP Session that uses the network standard library to do the low
     level communication.
     """
@@ -655,6 +659,7 @@ class TCPIPInstrVicp(Session):
 
     def after_parsing(self) -> None:
         # TODO: board_number not handled
+
         import pyvicp  # try "pip install pyvicp" if this is missing
 
         if "," in self.parsed.lan_device_name:
