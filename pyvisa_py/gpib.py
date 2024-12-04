@@ -9,13 +9,61 @@
 
 import ctypes  # Used for missing bindings not ideal
 from bisect import bisect
-from typing import Any, Iterator, List, Tuple, Union
+from typing import Any, Iterator, List, Tuple, Union, Type, Optional
 
 from pyvisa import attributes, constants, logger
 from pyvisa.constants import ResourceAttribute, StatusCode
-from pyvisa.rname import GPIBInstr, GPIBIntfc
+from pyvisa.rname import GPIBInstr, GPIBIntfc, ResourceName, parse_resource_name
 
-from .sessions import Session, UnknownAttribute
+from .sessions import Session, VISARMSession, UnknownAttribute, UnavailableSession
+from .prologix import BOARDS, PrologixInstrSession
+
+
+@Session.register(constants.InterfaceType.gpib, "INSTR")
+class GPIBSessionDispatch(Session):
+    """dispatch to the proper class based on entries in BOARDS."""
+
+    def __new__(
+        cls,
+        resource_manager_session: VISARMSession,
+        resource_name: str,
+        parsed: Optional[ResourceName] = None,
+        open_timeout: Optional[int] = None,
+    ) -> Session:
+        newcls: Type
+
+        if parsed is None:
+            parsed = parse_resource_name(resource_name)
+
+        if parsed.board in BOARDS:
+            newcls = PrologixInstrSession
+        else:
+            newcls = GPIBSession
+
+        return newcls(resource_manager_session, resource_name, parsed, open_timeout)
+
+
+def make_unavailable(msg: str) -> Type:
+    """
+    This creates a fake session class that raises a ValueError if instantiated.
+
+    Parameters
+    ----------
+    msg : str
+        Message detailing why no session class exists.
+
+    Returns
+    -------
+    Type[Session]
+        Fake session.
+    """
+
+    class _internal(UnavailableSession):
+        #: Message detailing why no session is available.
+        session_issue = msg
+
+    return _internal
+
 
 try:
     GPIB_CTYPES = True
@@ -41,7 +89,7 @@ try:
             "  gpib_ctypes.gpib.gpib._load_lib(filename)\n"
             "before importing pyvisa."
         )
-        Session.register_unavailable(constants.InterfaceType.gpib, "INSTR", msg)
+        GPIBSession = make_unavailable(msg)
         Session.register_unavailable(constants.InterfaceType.gpib, "INTFC", msg)
         raise
 
@@ -56,7 +104,7 @@ except ImportError:
             "to use this resource type. Note that installing gpib-ctypes will "
             "give you access to a broader range of functionalities.\n%s" % e
         )
-        Session.register_unavailable(constants.InterfaceType.gpib, "INSTR", msg)
+        GPIBSession = make_unavailable(msg)
         Session.register_unavailable(constants.InterfaceType.gpib, "INTFC", msg)
         raise
 
@@ -296,7 +344,7 @@ class _GPIBCommon(Session):
 
         # Force timeout setting to interface
         self.set_attribute(
-            constants.ResourceAttribute.timeout_value,
+            ResourceAttribute.timeout_value,
             attributes.AttributesByID[constants.VI_ATTR_TMO_VALUE].default,
         )
 
@@ -304,9 +352,7 @@ class _GPIBCommon(Session):
             attribute = getattr(constants, "VI_ATTR_" + name)
             self.attrs[attribute] = attributes.AttributesByID[attribute].default
 
-    def _get_timeout(
-        self, attribute: constants.ResourceAttribute
-    ) -> Tuple[int, StatusCode]:
+    def _get_timeout(self, attribute: ResourceAttribute) -> Tuple[int, StatusCode]:
         if self.interface:
             # 0x3 is the hexadecimal reference to the IbaTMO (timeout) configuration
             # option in linux-gpib.
@@ -318,7 +364,7 @@ class _GPIBCommon(Session):
                 self.timeout = None
         return super(_GPIBCommon, self)._get_timeout(attribute)
 
-    def _set_timeout(self, attribute: constants.ResourceAttribute, value: int):
+    def _set_timeout(self, attribute: ResourceAttribute, value: int):
         """Set the timeout value.
 
         linux-gpib only supports 18 discrete timeout values. If a timeout
@@ -448,7 +494,7 @@ class _GPIBCommon(Session):
                 constants.VI_GPIB_REN_DEASSERT,
                 constants.VI_GPIB_REN_ASSERT_LLO,
             ):
-                return constants.StatusCode.error_nonsupported_operation
+                return StatusCode.error_nonsupported_operation
 
         # INTFC don't have an interface so use the controller
         ifc = self.interface or self.controller
@@ -486,7 +532,7 @@ class _GPIBCommon(Session):
         except gpib.GpibError as e:
             return convert_gpib_error(e, self.interface.ibsta(), "perform control REN")
 
-        return constants.StatusCode.success
+        return StatusCode.success
 
     def _get_attribute(self, attribute: ResourceAttribute) -> Tuple[Any, StatusCode]:
         """Get the value for a given VISA attribute for this session.
@@ -556,7 +602,7 @@ class _GPIBCommon(Session):
         raise UnknownAttribute(attribute)
 
     def _set_attribute(
-        self, attribute: constants.ResourceAttribute, attribute_state: Any
+        self, attribute: ResourceAttribute, attribute_state: Any
     ) -> StatusCode:
         """Sets the state of an attribute.
 
@@ -564,7 +610,7 @@ class _GPIBCommon(Session):
 
         Parameters
         ----------
-        attribute : constants.ResourceAttribute
+        attribute : ResourceAttribute
             Attribute for which the state is to be modified. (Attributes.*)
         attribute_state : Any
             The state of the attribute to be set for the specified object.
@@ -635,9 +681,13 @@ class _GPIBCommon(Session):
 
 
 # TODO: Check secondary addresses.
-@Session.register(constants.InterfaceType.gpib, "INSTR")
 class GPIBSession(_GPIBCommon):
     """A GPIB Session that uses linux-gpib to do the low level communication."""
+
+    # we don't decorate this class with Session.register() because we don't
+    # want it to be registered in the _session_classes array, but we still
+    # need to define session_type to make the set_attribute machinery work.
+    session_type = (constants.InterfaceType.gpib, "INSTR")
 
     # Override parsed to take into account the fact that this class is only used
     # for a specific kind of resource
@@ -646,9 +696,11 @@ class GPIBSession(_GPIBCommon):
     @staticmethod
     def list_resources() -> List[str]:
         return [
-            "GPIB%d::%d::INSTR" % (board, pad)
-            if sad == 0
-            else "GPIB%d::%d::%d::INSTR" % (board, pad, sad - 0x60)
+            (
+                "GPIB%d::%d::INSTR" % (board, pad)
+                if sad == 0
+                else "GPIB%d::%d::%d::INSTR" % (board, pad, sad - 0x60)
+            )
             for board, pad, sad in _find_listeners()
         ]
 
@@ -703,9 +755,7 @@ class GPIBSession(_GPIBCommon):
         except gpib.GpibError as e:
             return 0, convert_gpib_error(e, self.interface.ibsta(), "read STB")
 
-    def _get_attribute(
-        self, attribute: constants.ResourceAttribute
-    ) -> Tuple[Any, StatusCode]:
+    def _get_attribute(self, attribute: ResourceAttribute) -> Tuple[Any, StatusCode]:
         """Get the value for a given VISA attribute for this session.
 
         Use to implement custom logic for attributes. GPIB::INSTR have the
@@ -719,7 +769,7 @@ class GPIBSession(_GPIBCommon):
 
         Parameters
         ----------
-        attribute : constants.ResourceAttribute
+        attribute : ResourceAttribute
             Resource attribute for which the state query is made
 
         Returns
@@ -873,7 +923,7 @@ class GPIBInterface(_GPIBCommon):
         elif mode == constants.VI_GPIB_ATN_DEASSERT_HANDSHAKE:
             status = gpib_lib.ibgts(self.controller.id, 1)
         else:
-            return constants.StatusCode.error_invalid_mode
+            return StatusCode.error_invalid_mode
         return convert_gpib_status(status)
 
     def gpib_pass_control(
