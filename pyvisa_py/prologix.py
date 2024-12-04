@@ -1,17 +1,28 @@
-from typing import Optional, List, Tuple, Any
+"""
+Implements the interface and instrument classes for Prologix-style devices.
+"""
+from typing import Optional, List, Tuple, Any, Union
 
-from pyvisa import constants, rname
+from pyvisa import constants, rname, logger
 from pyvisa.constants import BufferOperation, ResourceAttribute, StatusCode
 
 from . import tcpip
-from .sessions import Session, VISARMSession
+from .sessions import Session, VISARMSession, UnknownAttribute
 
 # dictionary lookup for Prologix controllers that have been opened
-BOARDS = dict()
+BOARDS = {}
 
 
-@Session.register(constants.InterfaceType.prlgx_tcpip, "INSTR")
-class PrologixTCPIPInstrSession(tcpip.TCPIPSocketSession):
+class _PrologixIntfcSession(Session):
+    """
+    This is the common class for both
+    PRLGX-TCPIP<n>::INSTR resources and
+    PRLGX-USB<n>::INSTR resources.
+    """
+
+    # Override parsed to take into account the fact that this class is only used
+    # for specific kinds of resources
+    parsed: Union[rname.TCPIPSocket]
 
     def __init__(
         self,
@@ -51,7 +62,7 @@ class PrologixTCPIPInstrSession(tcpip.TCPIPSocketSession):
 
     def close(self) -> StatusCode:
         BOARDS.pop(self.parsed.board)
-        return super().close()
+        return super().close()    # type: ignore[safe-super]
 
     @property
     def gpib_addr(self) -> str:
@@ -67,7 +78,22 @@ class PrologixTCPIPInstrSession(tcpip.TCPIPSocketSession):
             self._gpib_addr = addr
 
 
+@Session.register(constants.InterfaceType.prlgx_tcpip, "INSTR")
+class PrologixTCPIPInstrSession(_PrologixIntfcSession, tcpip.TCPIPSocketSession):
+    """
+    This class is instantiated for PRLGX-TCPIP<n>::INSTR resources.
+    """
+    # Override parsed to take into account the fact that this class is only
+    # used for specific kinds of resources
+    parsed: Union[rname.TCPIPSocket]
+
+    pass
+
 class PrologixInstrSession(Session):
+    """
+    This class is instantiated for GPIB<n>::INSTR resources, but only when
+    the corresponding PRLGX-xxx<n>::INSTR resource has been instantiated.
+    """
     # we don't decorate this class with Session.register() because we don't
     # want it to be registered in the _session_classes array, but we still
     # need to define session_type to make the set_attribute machinery work.
@@ -123,6 +149,7 @@ class PrologixInstrSession(Session):
             else:
                 last_byte = b""
 
+            # escape the "special" characters
             data = data.replace(b"\033", b"\033\033")
             data = data.replace(b"\n", b"\033\n")
             data = data.replace(b"\r", b"\033\r")

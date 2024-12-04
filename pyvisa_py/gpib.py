@@ -18,6 +18,7 @@ from pyvisa.rname import GPIBInstr, GPIBIntfc, ResourceName, parse_resource_name
 from .sessions import Session, VISARMSession, UnknownAttribute, UnavailableSession
 from .prologix import BOARDS, PrologixInstrSession
 
+GPIBSession: Type[Session]
 
 @Session.register(constants.InterfaceType.gpib, "INSTR")
 class GPIBSessionDispatch(Session):
@@ -35,10 +36,7 @@ class GPIBSessionDispatch(Session):
         if parsed is None:
             parsed = parse_resource_name(resource_name)
 
-        if parsed.board in BOARDS:
-            newcls = PrologixInstrSession
-        else:
-            newcls = GPIBSession
+        newcls = PrologixInstrSession if parsed.board in BOARDS else GPIBSession
 
         return newcls(resource_manager_session, resource_name, parsed, open_timeout)
 
@@ -67,9 +65,9 @@ def make_unavailable(msg: str) -> Type:
 
 try:
     GPIB_CTYPES = True
-    from gpib_ctypes import gpib  # typing: ignore
-    from gpib_ctypes.Gpib import Gpib  # typing: ignore
-    from gpib_ctypes.gpib.gpib import _lib as gpib_lib  # typing: ignore
+    from gpib_ctypes import gpib  # type: ignore
+    from gpib_ctypes.Gpib import Gpib  # type: ignore
+    from gpib_ctypes.gpib.gpib import _lib as gpib_lib  # type: ignore
 
     try:
         # Add some extra binding not available by default
@@ -96,8 +94,8 @@ try:
 except ImportError:
     GPIB_CTYPES = False
     try:
-        import gpib  # typing: ignore
-        from Gpib import Gpib  # typing: ignore
+        import gpib  # type: ignore
+        from Gpib import Gpib  # type: ignore
     except ImportError as e:
         msg = (
             "Please install linux-gpib (Linux) or gpib-ctypes (Windows, Linux) "
@@ -681,7 +679,7 @@ class _GPIBCommon(Session):
 
 
 # TODO: Check secondary addresses.
-class GPIBSession(_GPIBCommon):
+class GPIBSession(_GPIBCommon):    # type: ignore[no-redef]
     """A GPIB Session that uses linux-gpib to do the low level communication."""
 
     # we don't decorate this class with Session.register() because we don't
