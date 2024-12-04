@@ -3,7 +3,7 @@ Implements the interface and instrument classes for Prologix-style devices.
 """
 from typing import Optional, List, Tuple, Any, Union
 
-from pyvisa import constants, rname, logger
+from pyvisa import constants, rname, logger, errors
 from pyvisa.constants import BufferOperation, ResourceAttribute, StatusCode
 
 from . import tcpip
@@ -16,8 +16,8 @@ BOARDS = {}
 class _PrologixIntfcSession(Session):
     """
     This is the common class for both
-    PRLGX-TCPIP<n>::INSTR resources and
-    PRLGX-USB<n>::INSTR resources.
+    PRLGX-TCPIP<n>::INTFC resources and
+    PRLGX-USB<n>::INTFC resources.
     """
 
     # Override parsed to take into account the fact that this class is only used
@@ -78,10 +78,10 @@ class _PrologixIntfcSession(Session):
             self._gpib_addr = addr
 
 
-@Session.register(constants.InterfaceType.prlgx_tcpip, "INSTR")
+@Session.register(constants.InterfaceType.prlgx_tcpip, "INTFC")
 class PrologixTCPIPInstrSession(_PrologixIntfcSession, tcpip.TCPIPSocketSession):
     """
-    This class is instantiated for PRLGX-TCPIP<n>::INSTR resources.
+    This class is instantiated for PRLGX-TCPIP<n>::INTFC resources.
     """
     # Override parsed to take into account the fact that this class is only
     # used for specific kinds of resources
@@ -92,7 +92,7 @@ class PrologixTCPIPInstrSession(_PrologixIntfcSession, tcpip.TCPIPSocketSession)
 class PrologixInstrSession(Session):
     """
     This class is instantiated for GPIB<n>::INSTR resources, but only when
-    the corresponding PRLGX-xxx<n>::INSTR resource has been instantiated.
+    the corresponding PRLGX-xxx<n>::INTFC resource has been instantiated.
     """
     # we don't decorate this class with Session.register() because we don't
     # want it to be registered in the _session_classes array, but we still
@@ -119,50 +119,50 @@ class PrologixInstrSession(Session):
             self.gpib_addr += " " + self.parsed.secondary_address
 
     def close(self) -> StatusCode:
-        if self.interface:
-            self.interface = None
-            return StatusCode.success
+        if self.interface is None or self.interface.interface is None:
+            raise errors.InvalidSession()
 
-        return StatusCode.error_connection_lost
+        self.interface = None
+        return StatusCode.success
 
     def read(self, count: int) -> Tuple[bytes, StatusCode]:
-        if self.interface:
-            self.interface.gpib_addr = self.gpib_addr
-            self.interface.write(b"++read eoi\n")
-            return self.interface.read(count)
+        if self.interface is None or self.interface.interface is None:
+            raise errors.InvalidSession()
 
-        return (b"", StatusCode.error_connection_lost)
+        self.interface.gpib_addr = self.gpib_addr
+        self.interface.write(b"++read eoi\n")
+        return self.interface.read(count)
 
     def write(self, data: bytes) -> Tuple[int, StatusCode]:
-        if self.interface:
-            self.interface.gpib_addr = self.gpib_addr
-            # if the calling function has appended a newline to the data,
-            # we don't want it to be escaped.  remove it from the data
-            # and stash it away so we can append it after all the escapes
-            # have been added in.
-            if data[-2:] == b"\r\n":
-                last_byte = b"\r\n"
-                data = data[:-2]
-            elif data[-1] == ord("\n"):
-                last_byte = b"\n"
-                data = data[:-1]
-            else:
-                last_byte = b""
+        if self.interface is None or self.interface.interface is None:
+            raise errors.InvalidSession()
 
-            # escape the "special" characters
-            data = data.replace(b"\033", b"\033\033")
-            data = data.replace(b"\n", b"\033\n")
-            data = data.replace(b"\r", b"\033\r")
-            data = data.replace(b"+", b"\033+")
-            return self.interface.write(data + last_byte)
+        self.interface.gpib_addr = self.gpib_addr
+        # if the calling function has appended a newline to the data,
+        # we don't want it to be escaped.  remove it from the data
+        # and stash it away so we can append it after all the escapes
+        # have been added in.
+        if data[-2:] == b"\r\n":
+            last_byte = b"\r\n"
+            data = data[:-2]
+        elif data[-1] == ord("\n"):
+            last_byte = b"\n"
+            data = data[:-1]
+        else:
+            last_byte = b""
 
-        return (0, StatusCode.error_connection_lost)
+        # escape the "special" characters
+        data = data.replace(b"\033", b"\033\033")
+        data = data.replace(b"\n", b"\033\n")
+        data = data.replace(b"\r", b"\033\r")
+        data = data.replace(b"+", b"\033+")
+        return self.interface.write(data + last_byte)
 
     def flush(self, mask: BufferOperation) -> StatusCode:
-        if self.interface:
-            return self.interface.flush(mask)
+        if self.interface is None or self.interface.interface is None:
+            raise errors.InvalidSession()
 
-        return StatusCode.error_connection_lost
+        return self.interface.flush(mask)
 
     def clear(self) -> StatusCode:
         """Clears a device.
@@ -176,12 +176,12 @@ class PrologixInstrSession(Session):
 
         """
         logger.debug("GPIB.device clear")
-        if self.interface:
-            self.interface.gpib_addr = self.gpib_addr
-            _, status_code = self.interface.write(b"++clr\n")
-            return status_code
+        if self.interface is None or self.interface.interface is None:
+            raise errors.InvalidSession()
 
-        return StatusCode.error_connection_lost
+        self.interface.gpib_addr = self.gpib_addr
+        _, status_code = self.interface.write(b"++clr\n")
+        return status_code
 
     def assert_trigger(self, protocol: constants.TriggerProtocol) -> StatusCode:
         """Asserts hardware trigger.
@@ -200,22 +200,22 @@ class PrologixInstrSession(Session):
         """
         logger.debug("GPIB.device assert hardware trigger")
 
-        if self.interface:
-            self.interface.gpib_addr = self.gpib_addr
-            _, status_code = self.interface.write(b"++trg\n")
-            return status_code
+        if self.interface is None or self.interface.interface is None:
+            raise errors.InvalidSession()
 
-        return StatusCode.error_connection_lost
+        self.interface.gpib_addr = self.gpib_addr
+        _, status_code = self.interface.write(b"++trg\n")
+        return status_code
 
     def read_stb(self) -> Tuple[int, StatusCode]:
         """Read the device status byte."""
-        if self.interface:
-            self.interface.gpib_addr = self.gpib_addr
-            self.interface.write(b"++spoll\n")
-            data, status_code = self.interface.read(32)
-            return (int(data), status_code)
+        if self.interface is None or self.interface.interface is None:
+            raise errors.InvalidSession()
 
-        return (-1, StatusCode.error_connection_lost)
+        self.interface.gpib_addr = self.gpib_addr
+        self.interface.write(b"++spoll\n")
+        data, status_code = self.interface.read(32)
+        return (int(data), status_code)
 
     def _get_attribute(self, attribute: ResourceAttribute) -> Tuple[Any, StatusCode]:
         """Get the value for a given VISA attribute for this session.
