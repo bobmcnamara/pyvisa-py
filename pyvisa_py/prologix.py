@@ -1,6 +1,7 @@
 """
 Implements the interface and instrument classes for Prologix-style devices.
 """
+
 import time
 import socket
 import select
@@ -8,18 +9,19 @@ import sys
 
 from typing import Optional, List, Tuple, Any, Union
 
-import serial as pyserial
-
 from pyvisa import attributes, constants, rname, logger, errors
 from pyvisa.constants import BufferOperation, ResourceAttribute, StatusCode
 
-from . import tcpip, serial
+from .tcpip import TCPIPSocketSession
+from .serial import serial as pyserial
+from .serial import SerialSession, comports
 from .sessions import Session, VISARMSession, UnknownAttribute
 
 # dictionary lookup for Prologix controllers that have been opened
 BOARDS = {}
 
 IS_WIN = sys.platform == "win32"
+
 
 class _PrologixIntfcSession(Session):
     """
@@ -31,6 +33,7 @@ class _PrologixIntfcSession(Session):
     # Override parsed to take into account the fact that this class is only used
     # for specific kinds of resources
     parsed: Union[rname.TCPIPSocket, rname.PrlgxASRLIntfc]
+    plus_plus_read: bool = True
 
     def __init__(
         self,
@@ -53,7 +56,7 @@ class _PrologixIntfcSession(Session):
         # Read timeout is 500 msec
         # (code from Willow Garage, Inc uses 50ms)
         self._write_oob(b"++read_tmo_ms 500\n")
-        #self._write_oob(b"++read_tmo_ms 3000\n")
+        # self._write_oob(b"++read_tmo_ms 3000\n")
 
         # Do not append CR or LF to GPIB data
         self._write_oob(b"++eos 3\n")
@@ -71,7 +74,7 @@ class _PrologixIntfcSession(Session):
 
     def close(self) -> StatusCode:
         BOARDS.pop(self.parsed.board)
-        return super().close()    # type: ignore[safe-super]
+        return super().close()  # type: ignore[safe-super]
 
     @property
     def gpib_addr(self) -> str:
@@ -86,23 +89,12 @@ class _PrologixIntfcSession(Session):
             self._write_oob(f"++addr {addr}\n".encode())
             self._gpib_addr = addr
 
-
-@Session.register(constants.InterfaceType.prlgx_tcpip, "INTFC")
-class PrologixTCPIPIntfcSession(_PrologixIntfcSession, tcpip.TCPIPSocketSession):
-    """
-    This class is instantiated for PRLGX-TCPIP<n>::INTFC resources.
-    """
-    # Override parsed to take into account the fact that this class is only
-    # used for specific kinds of resources
-    parsed: rname.TCPIPSocket
-    plus_plus_read: bool = True
-
     def _write_oob(self, data: bytes) -> Tuple[int, StatusCode]:
         """out-of-band write (for sending "++" commands)"""
         if self.interface is None:
             raise errors.InvalidSession()
         time.sleep(100e-3)
-        #print(f"prologix.PrologixTCPIPIntfcSession._write_oob: {data=}")
+        # print(f"prologix._PrologixIntfcSession._write_oob: {data=}")
         return self.interface.send(data)
 
     def read(self, count: int) -> Tuple[bytes, StatusCode]:
@@ -114,6 +106,17 @@ class PrologixTCPIPIntfcSession(_PrologixIntfcSession, tcpip.TCPIPSocketSession)
             self.plus_plus_read = False
 
         return super().read(count)
+
+
+@Session.register(constants.InterfaceType.prlgx_tcpip, "INTFC")
+class PrologixTCPIPIntfcSession(_PrologixIntfcSession, TCPIPSocketSession):
+    """
+    This class is instantiated for PRLGX-TCPIP<n>::INTFC resources.
+    """
+
+    # Override parsed to take into account the fact that this class is only
+    # used for specific kinds of resources
+    parsed: rname.TCPIPSocket
 
     def write(self, data: bytes) -> Tuple[int, StatusCode]:
         """Writes data to device or interface synchronously.
@@ -138,27 +141,27 @@ class PrologixTCPIPIntfcSession(_PrologixIntfcSession, tcpip.TCPIPSocketSession)
 
         try:
             # use select to wait for write ready
-            rd, wr, _ = select.select([self.interface], [self.interface], [])
+            rd, _wr, _ = select.select([self.interface], [self.interface], [])
             if rd:
                 self.clear()
         except socket.timeout:
-            return offset, StatusCode.error_io
+            return 0, StatusCode.error_io
 
         self._pending_buffer.clear()
-        #print(f"prologix.PrologixTCPIPIntfcSession.write: {data=}")
+        # print(f"prologix.PrologixTCPIPIntfcSession.write: {data=}")
         self.plus_plus_read = True
         return super().write(data)
 
-    pass
 
 @Session.register(constants.InterfaceType.prlgx_asrl, "INTFC")
-class PrologixASRLIntfcSession(_PrologixIntfcSession, serial.SerialSession):
+class PrologixASRLIntfcSession(_PrologixIntfcSession, SerialSession):
     """
     This class is instantiated for PRLGX-ASRL<n>::INTFC resources.
     """
+
     # Override parsed to take into account the fact that this class is only
     # used for specific kinds of resources
-    parsed: Union[rname.TCPIPSocket, rname.ASRLInstr]
+    parsed: rname.PrlgxASRLIntfc
 
     @staticmethod
     def list_resources() -> List[str]:
@@ -174,9 +177,8 @@ class PrologixASRLIntfcSession(_PrologixIntfcSession, serial.SerialSession):
             write_timeout=self.timeout,
             baudrate=115200,
         )
-        #self.interface.write_termination = "\n"
-        #self.write_termination = "\n"
-        self.plus_plus_read = True
+        # self.interface.write_termination = "\n"
+        # self.write_termination = "\n"
 
         for name in (
             "ASRL_END_IN",
@@ -188,24 +190,6 @@ class PrologixASRLIntfcSession(_PrologixIntfcSession, serial.SerialSession):
         ):
             attribute = getattr(constants, "VI_ATTR_" + name)
             self.attrs[attribute] = attributes.AttributesByID[attribute].default
-
-    def _write_oob(self, data: bytes) -> Tuple[int, StatusCode]:
-        """out-of-band write (for sending "++" commands)"""
-        if self.interface is None:
-            raise errors.InvalidSession()
-        time.sleep(100e-3)
-        #print(f"_write_oob: {data=}")
-        return super().write(data)
-
-    def read(self, count: int) -> Tuple[bytes, StatusCode]:
-        if self.interface is None:
-            raise errors.InvalidSession()
-
-        if self.plus_plus_read:
-            self._write_oob(b"++read\n")
-            self.plus_plus_read = False
-
-        return super().read(count)
 
     def write(self, data: bytes) -> Tuple[int, StatusCode]:
         """Writes data to device or interface synchronously.
@@ -229,19 +213,19 @@ class PrologixASRLIntfcSession(_PrologixIntfcSession, serial.SerialSession):
             raise errors.InvalidSession()
 
         if self.interface.inWaiting() > 0:
-            #print("flushing...")
+            # print("flushing...")
             self.interface.flushInput()
-        #print(f"prologix.PrologixASRLIntfcSession.write: {data=}")
+        # print(f"prologix.PrologixASRLIntfcSession.write: {data=}")
         self.plus_plus_read = True
         return super().write(data)
 
-    pass
 
 class PrologixInstrSession(Session):
     """
     This class is instantiated for GPIB<n>::INSTR resources, but only when
     the corresponding PRLGX-xxx<n>::INTFC resource has been instantiated.
     """
+
     # we don't decorate this class with Session.register() because we don't
     # want it to be registered in the _session_classes array, but we still
     # need to define session_type to make the set_attribute machinery work.
@@ -309,7 +293,7 @@ class PrologixInstrSession(Session):
         data = data.replace(b"\r", b"\033\r")
         data = data.replace(b"+", b"\033+")
 
-        time.sleep(100e-3)    # can't remove as of kiss rev 2.39
+        time.sleep(100e-3)  # can't remove as of kiss rev 2.39
         return self.interface.write(data + last_byte)
 
     def flush(self, mask: BufferOperation) -> StatusCode:
