@@ -28,7 +28,7 @@ class GPIBSessionDispatch(Session):
         cls,
         resource_manager_session: VISARMSession,
         resource_name: str,
-        parsed: Optional[ResourceName] = None,
+        parsed: Optional[GPIBInstr] = None,
         open_timeout: Optional[int] = None,
     ) -> Session:
         newcls: Type

@@ -64,7 +64,7 @@ class PyVisaLibrary(highlevel.VisaLibraryBase):
         logger.debug("TCPIPSession was not imported %s." % e)
 
     try:
-        from .prologix import PrologixTCPIPInstrSession
+        from .prologix import _PrologixIntfcSession
 
         logger.debug("PrologixTCPIPIntfcSession was correctly imported.")
     except Exception as e:

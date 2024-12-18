@@ -30,10 +30,11 @@ class _PrologixIntfcSession(Session):
     PRLGX-ASRL<n>::INTFC resources.
     """
 
-    # Override parsed to take into account the fact that this class is only used
-    # for specific kinds of resources
+    # Override parsed to take into account the fact that this
+    # class is only used for specific kinds of resources
     parsed: Union[rname.TCPIPSocket, rname.PrlgxASRLIntfc]
     plus_plus_read: bool = True
+    rd_ahead: bytes = b""
 
     def __init__(
         self,
@@ -95,17 +96,75 @@ class _PrologixIntfcSession(Session):
             raise errors.InvalidSession()
         time.sleep(100e-3)
         # print(f"prologix._PrologixIntfcSession._write_oob: {data=}")
-        return self.interface.send(data)
+        return super().write(data)
 
     def read(self, count: int) -> Tuple[bytes, StatusCode]:
         if self.interface is None:
             raise errors.InvalidSession()
 
         if self.plus_plus_read:
-            self._write_oob(b"++read\n")
             self.plus_plus_read = False
+            finish_time = None if self.timeout is None else (time.time() + self.timeout)
+            request_size = max(count, len("Timed Out\r\n"))
 
-        return super().read(count)
+            while True:
+                self._write_oob(b"++read\n")
+                read_buffer, status_code = super().read(request_size)
+                # print(f"prologix._PrologixIntfcSession.read: {read_buffer=}, {status_code=}")
+                if read_buffer != b"Timed Out\r\n":
+                    if request_size == count:
+                        return read_buffer, status_code
+                    else:
+                        self.rd_ahead = read_buffer[count:]
+                        self.status_code = status_code
+                        return (read_buffer[:count], StatusCode.success_max_count_read)
+
+                # we received b"Timed Out\r\n"
+                if finish_time and time.time() >= finish_time:
+                    return b"", StatusCode.error_timeout
+                else:
+                    # try again
+                    pass
+
+        nbytes = len(self.rd_ahead)
+        if nbytes:
+            rd_ahead = self.rd_ahead[:count]
+            self.rd_ahead = self.rd_ahead[count:]
+            if (nbytes == count
+                or self.status_code == StatusCode.success
+                or self.status_code == StatusCode.success_termination_character_read):
+                # print(f"prologix._PrologixIntfcSession.read: {rd_ahead=}, {self.status_code=}")
+                return (rd_ahead, self.status_code)
+            elif nbytes > count:
+                # print(f"prologix._PrologixIntfcSession.read: {rd_ahead=}, StatusCode.success_max_count_read")
+                return (rd_ahead, StatusCode.success_max_count_read)
+            else:
+                # nbytes < count
+                assert self.status_code == StatusCode.success_max_count_read
+                read_buffer, status_code = super().read(count - nbytes)
+                # print(f"prologix._PrologixIntfcSession.read: {rd_ahead+read_buffer=}, {status_code=}")
+                return (rd_ahead + read_buffer, status_code)
+
+        retval, status = super().read(count)
+        # if status != StatusCode.success:
+            # print(f"prologix._PrologixIntfcSession.read: {retval[:32]=}, {status=}")
+        return retval, status
+
+
+    def old_read(self, count: int) -> Tuple[bytes, StatusCode]:
+        if self.interface is None:
+            raise errors.InvalidSession()
+
+        if self.plus_plus_read:
+            self.plus_plus_read = False
+            self._write_oob(b"++read\n")
+
+        retval, status = super().read(count)
+        # if status != StatusCode.success:
+            # print(f"prologix._PrologixIntfcSession.read: {count=}, {retval=}, {status=}")
+        # else:
+            # print(f"prologix._PrologixIntfcSession.read: {count=}, {retval[-3:]=}, {status=}")
+        return retval, status
 
 
 @Session.register(constants.InterfaceType.prlgx_tcpip, "INTFC")
@@ -161,12 +220,12 @@ class PrologixASRLIntfcSession(_PrologixIntfcSession, SerialSession):
 
     # Override parsed to take into account the fact that this class is only
     # used for specific kinds of resources
-    parsed: rname.PrlgxASRLIntfc
+    parsed: rname.PrlgxASRLIntfc  # type: ignore[assignment]
 
     @staticmethod
     def list_resources() -> List[str]:
         return [
-            "PRLGX-ASRL::%s::INTFC" % (port[0][3:] if IS_WIN else port[0])
+            f"PRLGX-ASRL::{port[0][3:] if IS_WIN else port[0]}::INTFC"
             for port in comports()
         ]
 
@@ -231,8 +290,8 @@ class PrologixInstrSession(Session):
     # need to define session_type to make the set_attribute machinery work.
     session_type = (constants.InterfaceType.gpib, "INSTR")
 
-    # Override parsed to take into account the fact that this class is only used
-    # for a specific kind of resource
+    # Override parsed to take into account the fact that this
+    # class is only used for a specific kind of resource
     parsed: rname.GPIBInstr
 
     @staticmethod
