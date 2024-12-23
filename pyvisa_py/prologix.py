@@ -108,7 +108,7 @@ class _PrologixIntfcSession(Session):
             request_size = max(count, len("Timed Out\r\n"))
 
             while True:
-                self._write_oob(b"++read\n")
+                self._write_oob(b"++read eoi\n")
                 read_buffer, status_code = super().read(request_size)
                 # print(f"prologix._PrologixIntfcSession.read: {read_buffer=}, {status_code=}")
                 if read_buffer != b"Timed Out\r\n":
@@ -130,9 +130,11 @@ class _PrologixIntfcSession(Session):
         if nbytes:
             rd_ahead = self.rd_ahead[:count]
             self.rd_ahead = self.rd_ahead[count:]
-            if (nbytes == count
+            if (
+                nbytes == count
                 or self.status_code == StatusCode.success
-                or self.status_code == StatusCode.success_termination_character_read):
+                or self.status_code == StatusCode.success_termination_character_read
+            ):
                 # print(f"prologix._PrologixIntfcSession.read: {rd_ahead=}, {self.status_code=}")
                 return (rd_ahead, self.status_code)
             elif nbytes > count:
@@ -147,9 +149,8 @@ class _PrologixIntfcSession(Session):
 
         retval, status = super().read(count)
         # if status != StatusCode.success:
-            # print(f"prologix._PrologixIntfcSession.read: {retval[:32]=}, {status=}")
+        #     print(f"prologix._PrologixIntfcSession.read: {retval[:32]=}, {status=}")
         return retval, status
-
 
     def old_read(self, count: int) -> Tuple[bytes, StatusCode]:
         if self.interface is None:
@@ -157,13 +158,13 @@ class _PrologixIntfcSession(Session):
 
         if self.plus_plus_read:
             self.plus_plus_read = False
-            self._write_oob(b"++read\n")
+            self._write_oob(b"++read eoi\n")
 
         retval, status = super().read(count)
         # if status != StatusCode.success:
-            # print(f"prologix._PrologixIntfcSession.read: {count=}, {retval=}, {status=}")
+        #     print(f"prologix._PrologixIntfcSession.read: {count=}, {retval=}, {status=}")
         # else:
-            # print(f"prologix._PrologixIntfcSession.read: {count=}, {retval[-3:]=}, {status=}")
+        #     print(f"prologix._PrologixIntfcSession.read: {count=}, {retval[-3:]=}, {status=}")
         return retval, status
 
 
