@@ -2,20 +2,17 @@
 Implements the interface and instrument classes for Prologix-style devices.
 """
 
-import time
-import socket
 import select
+import socket
 import sys
+from typing import Any, List, Optional, Tuple, Union
 
-from typing import Optional, List, Tuple, Any, Union
-
-from pyvisa import attributes, constants, rname, logger, errors
+from pyvisa import attributes, constants, errors, logger, rname
 from pyvisa.constants import BufferOperation, ResourceAttribute, StatusCode
 
+from .serial import SerialSession, comports, serial as pyserial
+from .sessions import Session, UnknownAttribute, VISARMSession
 from .tcpip import TCPIPSocketSession
-from .serial import serial as pyserial
-from .serial import SerialSession, comports
-from .sessions import Session, VISARMSession, UnknownAttribute
 
 # dictionary lookup for Prologix controllers that have been opened
 BOARDS = {}
@@ -23,7 +20,7 @@ BOARDS = {}
 IS_WIN = sys.platform == "win32"
 
 
-class _PrologixIntfcSession(Session):
+class _PrologixIntfcSession(Session):  # pylint: disable=W0223
     """
     This is the common class for both
     PRLGX-TCPIP<n>::INTFC resources and
@@ -49,26 +46,23 @@ class _PrologixIntfcSession(Session):
         self.set_attribute(ResourceAttribute.termchar_enabled, True)
 
         # Set mode as CONTROLLER
-        self._write_oob(b"++mode 1\n")
+        self.write_oob(b"++mode 1\n")
 
         # Turn off read-after-write to avoid "Query Unterminated" errors
-        self._write_oob(b"++auto 0\n")
+        self.write_oob(b"++auto 0\n")
 
-        # Read timeout is 500 msec
-        # (code from Willow Garage, Inc uses 50ms)
-        self._write_oob(b"++read_tmo_ms 500\n")
-        # self._write_oob(b"++read_tmo_ms 3000\n")
+        # Read timeout is 50ms (from Willow Garage, Inc code)
+        self.write_oob(b"++read_tmo_ms 50\n")
 
         # Do not append CR or LF to GPIB data
-        self._write_oob(b"++eos 3\n")
+        self.write_oob(b"++eos 3\n")
 
         # Assert EOI with last byte to indicate end of data
-        self._write_oob(b"++eoi 1\n")
+        self.write_oob(b"++eoi 1\n")
 
-        if False:
-            # additional setup found in code from Willow Garage, Inc
-            self._write_oob(b"++eot_enable 1\n")
-            self._write_oob(b"++eot_char 0\n")
+        # additional setup found in code from Willow Garage, Inc
+        self.write_oob(b"++eot_enable 1\n")
+        self.write_oob(b"++eot_char 0\n")
 
         BOARDS[self.parsed.board] = self
         self._gpib_addr = ""
@@ -87,15 +81,14 @@ class _PrologixIntfcSession(Session):
     @gpib_addr.setter
     def gpib_addr(self, addr: str) -> None:
         if self._gpib_addr != addr:
-            self._write_oob(f"++addr {addr}\n".encode())
+            self.write_oob(f"++addr {addr}\n".encode())
             self._gpib_addr = addr
 
-    def _write_oob(self, data: bytes) -> Tuple[int, StatusCode]:
+    def write_oob(self, data: bytes) -> Tuple[int, StatusCode]:
         """out-of-band write (for sending "++" commands)"""
         if self.interface is None:
             raise errors.InvalidSession()
-        time.sleep(100e-3)
-        # print(f"prologix._PrologixIntfcSession._write_oob: {data=}")
+
         return super().write(data)
 
     def read(self, count: int) -> Tuple[bytes, StatusCode]:
@@ -104,68 +97,19 @@ class _PrologixIntfcSession(Session):
 
         if self.plus_plus_read:
             self.plus_plus_read = False
-            finish_time = None if self.timeout is None else (time.time() + self.timeout)
-            request_size = max(count, len("Timed Out\r\n"))
+            self.write_oob(b"++read eoi\n")
 
-            while True:
-                self._write_oob(b"++read eoi\n")
-                read_buffer, status_code = super().read(request_size)
-                # print(f"prologix._PrologixIntfcSession.read: {read_buffer=}, {status_code=}")
-                if read_buffer != b"Timed Out\r\n":
-                    if request_size == count:
-                        return read_buffer, status_code
-                    else:
-                        self.rd_ahead = read_buffer[count:]
-                        self.status_code = status_code
-                        return (read_buffer[:count], StatusCode.success_max_count_read)
+        return super().read(count)
 
-                # we received b"Timed Out\r\n"
-                if finish_time and time.time() >= finish_time:
-                    return b"", StatusCode.error_timeout
-                else:
-                    # try again
-                    pass
+    def assert_trigger(self, protocol: constants.TriggerProtocol) -> StatusCode:
+        """Asserts hardware trigger.
 
-        nbytes = len(self.rd_ahead)
-        if nbytes:
-            rd_ahead = self.rd_ahead[:count]
-            self.rd_ahead = self.rd_ahead[count:]
-            if (
-                nbytes == count
-                or self.status_code == StatusCode.success
-                or self.status_code == StatusCode.success_termination_character_read
-            ):
-                # print(f"prologix._PrologixIntfcSession.read: {rd_ahead=}, {self.status_code=}")
-                return (rd_ahead, self.status_code)
-            elif nbytes > count:
-                # print(f"prologix._PrologixIntfcSession.read: {rd_ahead=}, StatusCode.success_max_count_read")
-                return (rd_ahead, StatusCode.success_max_count_read)
-            else:
-                # nbytes < count
-                assert self.status_code == StatusCode.success_max_count_read
-                read_buffer, status_code = super().read(count - nbytes)
-                # print(f"prologix._PrologixIntfcSession.read: {rd_ahead+read_buffer=}, {status_code=}")
-                return (rd_ahead + read_buffer, status_code)
-
-        retval, status = super().read(count)
-        # if status != StatusCode.success:
-        #     print(f"prologix._PrologixIntfcSession.read: {retval[:32]=}, {status=}")
-        return retval, status
-
-    def old_read(self, count: int) -> Tuple[bytes, StatusCode]:
+        Implemented by instr sessions, not intfc sessions.
+        """
         if self.interface is None:
             raise errors.InvalidSession()
 
-        if self.plus_plus_read:
-            self.plus_plus_read = False
-            self._write_oob(b"++read eoi\n")
-
-        retval, status = super().read(count)
-        # if status != StatusCode.success:
-        #     print(f"prologix._PrologixIntfcSession.read: {count=}, {retval=}, {status=}")
-        # else:
-        #     print(f"prologix._PrologixIntfcSession.read: {count=}, {retval[-3:]=}, {status=}")
-        return retval, status
+        raise NotImplementedError
 
 
 @Session.register(constants.InterfaceType.prlgx_tcpip, "INTFC")
@@ -208,7 +152,6 @@ class PrologixTCPIPIntfcSession(_PrologixIntfcSession, TCPIPSocketSession):
             return 0, StatusCode.error_io
 
         self._pending_buffer.clear()
-        # print(f"prologix.PrologixTCPIPIntfcSession.write: {data=}")
         self.plus_plus_read = True
         return super().write(data)
 
@@ -273,9 +216,7 @@ class PrologixASRLIntfcSession(_PrologixIntfcSession, SerialSession):
             raise errors.InvalidSession()
 
         if self.interface.inWaiting() > 0:
-            # print("flushing...")
             self.interface.flushInput()
-        # print(f"prologix.PrologixASRLIntfcSession.write: {data=}")
         self.plus_plus_read = True
         return super().write(data)
 
@@ -353,7 +294,6 @@ class PrologixInstrSession(Session):
         data = data.replace(b"\r", b"\033\r")
         data = data.replace(b"+", b"\033+")
 
-        time.sleep(100e-3)  # can't remove as of kiss rev 2.39
         return self.interface.write(data + last_byte)
 
     def flush(self, mask: BufferOperation) -> StatusCode:
@@ -378,7 +318,7 @@ class PrologixInstrSession(Session):
             raise errors.InvalidSession()
 
         self.interface.gpib_addr = self.gpib_addr
-        _, status_code = self.interface._write_oob(b"++clr\n")
+        _, status_code = self.interface.write_oob(b"++clr\n")
         return status_code
 
     def assert_trigger(self, protocol: constants.TriggerProtocol) -> StatusCode:
@@ -402,7 +342,7 @@ class PrologixInstrSession(Session):
             raise errors.InvalidSession()
 
         self.interface.gpib_addr = self.gpib_addr
-        _, status_code = self.interface._write_oob(b"++trg\n")
+        _, status_code = self.interface.write_oob(b"++trg\n")
         return status_code
 
     def read_stb(self) -> Tuple[int, StatusCode]:
@@ -411,7 +351,7 @@ class PrologixInstrSession(Session):
             raise errors.InvalidSession()
 
         self.interface.gpib_addr = self.gpib_addr
-        self.interface._write_oob(b"++spoll\n")
+        self.interface.write_oob(b"++spoll\n")
         data, status_code = self.interface.read(32)
         return (int(data), status_code)
 

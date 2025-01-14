@@ -13,22 +13,27 @@ from typing import Any, Iterator, List, Tuple, Union, Type, Optional
 
 from pyvisa import attributes, constants, logger
 from pyvisa.constants import ResourceAttribute, StatusCode
-from pyvisa.rname import GPIBInstr, GPIBIntfc, ResourceName, parse_resource_name
+from pyvisa.rname import GPIBInstr, GPIBIntfc, parse_resource_name
 
 from .sessions import Session, VISARMSession, UnknownAttribute, UnavailableSession
-from .prologix import BOARDS, PrologixInstrSession
+from . import prologix
 
-GPIBSession: Type[Session]
 
 @Session.register(constants.InterfaceType.gpib, "INSTR")
 class GPIBSessionDispatch(Session):
-    """dispatch to the proper class based on entries in BOARDS."""
+    """dispatch to the proper class based on entries in prologix.BOARDS.
 
-    def __new__(
+    Uses the __new__ method to intercept the creation of the instance of a
+    GPIB session.  If parsed.board is found in prologix.BOARDS, create an
+    instance of prologix.PrologixInstrSession, otherwise create an instance
+    of GPIBSession.
+    """
+
+    def __new__(  # type: ignore[misc]
         cls,
         resource_manager_session: VISARMSession,
         resource_name: str,
-        parsed: Optional[GPIBInstr] = None,
+        parsed=None,
         open_timeout: Optional[int] = None,
     ) -> Session:
         newcls: Type
@@ -36,7 +41,10 @@ class GPIBSessionDispatch(Session):
         if parsed is None:
             parsed = parse_resource_name(resource_name)
 
-        newcls = PrologixInstrSession if parsed.board in BOARDS else GPIBSession
+        if parsed.board in prologix.BOARDS:
+            newcls = prologix.PrologixInstrSession
+        else:
+            newcls = GPIBSession
 
         return newcls(resource_manager_session, resource_name, parsed, open_timeout)
 
@@ -44,6 +52,9 @@ class GPIBSessionDispatch(Session):
 def make_unavailable(msg: str) -> Type:
     """
     This creates a fake session class that raises a ValueError if instantiated.
+
+    We can't use Session.register_unavailable() because we need to be able to
+    first check if a GPIB "board" has been registered in prologix.BOARDS.
 
     Parameters
     ----------
@@ -679,7 +690,7 @@ class _GPIBCommon(Session):
 
 
 # TODO: Check secondary addresses.
-class GPIBSession(_GPIBCommon):    # type: ignore[no-redef]
+class GPIBSession(_GPIBCommon):  # type: ignore[no-redef]
     """A GPIB Session that uses linux-gpib to do the low level communication."""
 
     # we don't decorate this class with Session.register() because we don't
@@ -796,7 +807,7 @@ class GPIBSession(_GPIBCommon):    # type: ignore[no-redef]
             else:
                 return constants.VI_FALSE, StatusCode.success
 
-        return super(GPIBSession, self)._get_attribute(attribute)
+        return super()._get_attribute(attribute)
 
     def _set_attribute(
         self, attribute: ResourceAttribute, attribute_state: Any
@@ -841,7 +852,7 @@ class GPIBSession(_GPIBCommon):    # type: ignore[no-redef]
             except gpib.GpibError:
                 return StatusCode.error_nonsupported_attribute_state
 
-        return super(GPIBSession, self)._set_attribute(attribute, attribute_state)
+        return super()._set_attribute(attribute, attribute_state)
 
 
 @Session.register(constants.InterfaceType.gpib, "INTFC")

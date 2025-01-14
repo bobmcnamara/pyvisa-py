@@ -26,7 +26,7 @@ from .sessions import Session, UnknownAttribute, VISARMSession
 try:
     import psutil  # type: ignore
 except ImportError:
-    psutil = None
+    psutil = None  # type: ignore
 
 # Let zeroconf be optional dependency
 try:
@@ -255,9 +255,11 @@ class TCPIPInstrHiSLIP(Session):
             status = (
                 StatusCode.success_termination_character_read
                 if self.interface._rmt
-                else StatusCode.success_max_count_read
-                if len(data) >= count
-                else StatusCode.success
+                else (
+                    StatusCode.success_max_count_read
+                    if len(data) >= count
+                    else StatusCode.success
+                )
             )
 
         except socket.timeout:
@@ -419,9 +421,9 @@ class TCPIPInstrVxi11(Session):
             # Get broadcast address for each interface
             for interface, snics in psutil.net_if_addrs().items():
                 for snic in snics:
-                    if snic.family is socket.AF_INET:
-                        addr = snic.address
-                        mask = snic.netmask
+                    if snic.family is socket.AF_INET and snic.netmask is not None:
+                        addr: str = snic.address
+                        mask: str = snic.netmask
                         network = ipaddress.IPv4Network(addr + "/" + mask, strict=False)
                         broadcast_addr.append(str(network.broadcast_address))
         else:
@@ -1330,9 +1332,11 @@ class TCPIPSocketSession(Session):
         if self.interface:
             value = self.interface.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY)
             return (
-                constants.VisaBoolean.true
-                if value == 1
-                else constants.VisaBoolean.false,
+                (
+                    constants.VisaBoolean.true
+                    if value == 1
+                    else constants.VisaBoolean.false
+                ),
                 StatusCode.success,
             )
         return constants.VisaBoolean.false, StatusCode.error_nonsupported_attribute
@@ -1353,9 +1357,11 @@ class TCPIPSocketSession(Session):
         if self.interface:
             value = self.interface.getsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE)
             return (
-                constants.VisaBoolean.true
-                if value == 1
-                else constants.VisaBoolean.false,
+                (
+                    constants.VisaBoolean.true
+                    if value == 1
+                    else constants.VisaBoolean.false
+                ),
                 StatusCode.success,
             )
         return constants.VisaBoolean.false, StatusCode.error_nonsupported_attribute
